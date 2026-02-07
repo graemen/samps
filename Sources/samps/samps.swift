@@ -212,36 +212,44 @@ struct WaveformDetailView: View {
         VStack(spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-            if let image = library.waveform(for: sample) {
-                GeometryReader { geo in
-                    let inset: CGFloat = 12
-                    let availableWidth = max(0, geo.size.width - inset * 2)
-                    ZStack {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .padding(inset)
-                            .opacity(0.65)
-                        if library.playbackSampleID == sample.id && library.playbackProgress > 0 {
+                    .fill(Color.black)
+                    .overlay(
+                        WaveformGrid()
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    )
+                if let image = library.waveform(for: sample) {
+                    GeometryReader { geo in
+                        let inset: CGFloat = 12
+                        let availableWidth = max(0, geo.size.width - inset * 2)
+                        ZStack {
                             Image(nsImage: image)
                                 .renderingMode(.template)
                                 .resizable()
                                 .scaledToFit()
                                 .padding(inset)
-                                .foregroundStyle(Color(nsColor: .darkGray))
-                                .opacity(0.75)
-                                .mask(
-                                    HStack {
-                                        Rectangle()
-                                            .frame(width: availableWidth * CGFloat(library.playbackProgress))
-                                        Spacer()
-                                    }
-                                    .padding(.leading, inset)
-                                )
+                                .foregroundStyle(Color(hue: 0.14, saturation: 1.0, brightness: 1.0))
+                                .opacity(1.0)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                            if library.playbackSampleID == sample.id && library.playbackProgress > 0 {
+                                Image(nsImage: image)
+                                    .renderingMode(.template)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .padding(inset)
+                                    .foregroundStyle(Color.gray)
+                                    .opacity(0.7)
+                                    .mask(
+                                        HStack {
+                                            Rectangle()
+                                                .frame(width: availableWidth * CGFloat(library.playbackProgress))
+                                            Spacer()
+                                        }
+                                        .padding(.leading, inset)
+                                    )
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                            }
                         }
                     }
-                }
             } else {
                 ProgressView()
             }
@@ -266,10 +274,8 @@ struct WaveformDetailView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-            if library.playbackSampleID == sample.id {
-                ProgressView(value: library.playbackProgress)
-                    .progressViewStyle(.linear)
-            }
+            ProgressView(value: library.playbackSampleID == sample.id ? library.playbackProgress : 0)
+                .progressViewStyle(.linear)
         }
     }
 
@@ -279,6 +285,30 @@ struct WaveformDetailView: View {
         let minutes = totalSeconds / 60
         let remaining = totalSeconds % 60
         return String(format: "%d:%02d", minutes, remaining)
+    }
+}
+
+struct WaveformGrid: View {
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let height = geo.size.height
+            let columns = 10
+            let rows = 4
+            Path { path in
+                for i in 0...columns {
+                    let x = width * CGFloat(i) / CGFloat(columns)
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: height))
+                }
+                for j in 0...rows {
+                    let y = height * CGFloat(j) / CGFloat(rows)
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: width, y: y))
+                }
+            }
+            .stroke(Color.gray.opacity(0.25), lineWidth: 1)
+        }
     }
 }
 
