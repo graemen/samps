@@ -1,6 +1,14 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import SQLite3
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+enum LibrarySource {
+    case json(URL)
+    case sqlite(URL)
+}
 
 @main
 struct SampsApp: App {
@@ -12,6 +20,22 @@ struct SampsApp: App {
             ContentView()
                 .environmentObject(library)
                 .frame(minWidth: 980, minHeight: 640)
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Library…") {
+                    library.newLibrary()
+                }
+                .keyboardShortcut("n", modifiers: [.command])
+                Button("Open Library…") {
+                    library.openLibrary()
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+                Button("Save Library As…") {
+                    library.saveLibraryAs()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
         }
     }
 }
@@ -287,9 +311,18 @@ struct WaveformDetailView: View {
         VStack(spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.black)
+                    .fill(Color(red: 0.02, green: 0.10, blue: 0.05))
                     .overlay(
-                        WaveformGrid()
+                        WaveformGrid(color: Color.green.opacity(0.18))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    )
+                    .overlay(
+                        ScanlinesView()
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .opacity(0.12)
+                    )
+                    .overlay(
+                        VignetteView()
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     )
                 if let image = library.detailWaveform(for: sample) ?? library.waveform(for: sample) {
@@ -302,8 +335,17 @@ struct WaveformDetailView: View {
                                 .resizable()
                                 .scaledToFit()
                                 .padding(inset)
-                                .foregroundStyle(Color.white)
+                                .foregroundStyle(Color(red: 0.25, green: 1.0, blue: 0.55))
                                 .opacity(1.0)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                            Image(nsImage: image)
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(inset)
+                                .foregroundStyle(Color(red: 0.25, green: 1.0, blue: 0.55))
+                                .opacity(0.35)
+                                .blur(radius: 3)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                             if library.playbackSampleID == sample.id && library.playbackProgress > 0 {
                                 Image(nsImage: image)
@@ -311,7 +353,7 @@ struct WaveformDetailView: View {
                                     .resizable()
                                     .scaledToFit()
                                     .padding(inset)
-                                    .foregroundStyle(Color.cyan)
+                                    .foregroundStyle(Color(red: 0.55, green: 1.0, blue: 0.75))
                                     .opacity(0.7)
                                     .mask(
                                         HStack {
@@ -366,6 +408,8 @@ struct WaveformDetailView: View {
 }
 
 struct WaveformGrid: View {
+    var color: Color = Color.gray.opacity(0.25)
+
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
@@ -384,7 +428,7 @@ struct WaveformGrid: View {
                     path.addLine(to: CGPoint(x: width, y: y))
                 }
             }
-            .stroke(Color.gray.opacity(0.25), lineWidth: 1)
+            .stroke(color, lineWidth: 1)
         }
     }
 }
@@ -398,6 +442,34 @@ struct WaveformXAxisLegend: View {
                 .foregroundStyle(Color.gray.opacity(0.7))
             Spacer()
         }
+    }
+}
+
+struct ScanlinesView: View {
+    var body: some View {
+        GeometryReader { geo in
+            let height = geo.size.height
+            Path { path in
+                var y: CGFloat = 0
+                while y <= height {
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: y))
+                    y += 4
+                }
+            }
+            .stroke(Color.black.opacity(0.4), lineWidth: 1)
+        }
+    }
+}
+
+struct VignetteView: View {
+    var body: some View {
+        RadialGradient(
+            gradient: Gradient(colors: [Color.clear, Color.black.opacity(0.45)]),
+            center: .center,
+            startRadius: 60,
+            endRadius: 240
+        )
     }
 }
 
@@ -953,6 +1025,7 @@ final class LibraryStore: ObservableObject {
     private var detailWaveformInProgress: Set<Sample.ID> = []
     @Published private var detailWaveformCache: [Sample.ID: NSImage] = [:]
     private let supportedExtensions: Set<String> = ["wav", "aif", "aiff", "mp3", "m4a", "flac", "ogg"]
+    private var librarySource: LibrarySource
 
     var filteredSamples: [Sample] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -978,7 +1051,7 @@ final class LibraryStore: ObservableObject {
         samples.filter { selection.contains($0.id) }
     }
 
-    private var libraryURL: URL {
+    private static func makeDefaultLibraryURL() -> URL {
         let manager = FileManager.default
         let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let folder = base.appendingPathComponent("Samps", isDirectory: true)
@@ -1003,7 +1076,67 @@ final class LibraryStore: ObservableObject {
     }
 
     init() {
+        self.librarySource = .json(Self.makeDefaultLibraryURL())
         load()
+    }
+
+    func openLibrary() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = ["json", "sqlite", "db"]
+        if panel.runModal() == .OK, let url = panel.url {
+            if url.pathExtension.lowercased() == "json" {
+                librarySource = .json(url)
+            } else {
+                librarySource = .sqlite(url)
+            }
+            selection.removeAll()
+            load()
+        }
+    }
+
+    func saveLibraryAs() {
+        let panel = NSSavePanel()
+        panel.allowedFileTypes = ["json", "sqlite", "db"]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "library.json"
+        if panel.runModal() == .OK, let url = panel.url {
+            if url.pathExtension.lowercased() == "json" {
+                librarySource = .json(url)
+            } else {
+                librarySource = .sqlite(url)
+            }
+            save()
+        }
+    }
+
+    func newLibrary() {
+        save()
+        resetLibraryState()
+        let panel = NSSavePanel()
+        panel.allowedFileTypes = ["json", "sqlite", "db"]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "library.json"
+        if panel.runModal() == .OK, let url = panel.url {
+            if url.pathExtension.lowercased() == "json" {
+                librarySource = .json(url)
+            } else {
+                librarySource = .sqlite(url)
+            }
+            save()
+        }
+    }
+
+    private func resetLibraryState() {
+        samples.removeAll()
+        selection.removeAll()
+        searchText = ""
+        waveformCache.removeAll()
+        detailWaveformCache.removeAll()
+        waveformInProgress.removeAll()
+        detailWaveformInProgress.removeAll()
     }
 
     func addSample(url: URL, tags: String) {
@@ -1457,26 +1590,161 @@ final class LibraryStore: ObservableObject {
     }
 
     private func load() {
-        let url = libraryURL
-        guard let data = try? Data(contentsOf: url) else {
-            samples = []
-            return
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? decoder.decode([Sample].self, from: data) {
-            samples = decoded
-        } else {
-            samples = []
+        switch librarySource {
+        case .json(let url):
+            guard let data = try? Data(contentsOf: url) else {
+                samples = []
+                return
+            }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let decoded = try? decoder.decode([Sample].self, from: data) {
+                samples = decoded
+            } else {
+                samples = []
+            }
+        case .sqlite(let url):
+            samples = loadFromSQLite(url: url)
         }
     }
 
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(samples) else { return }
-        try? data.write(to: libraryURL)
+        switch librarySource {
+        case .json(let url):
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            guard let data = try? encoder.encode(samples) else { return }
+            try? data.write(to: url)
+        case .sqlite(let url):
+            saveToSQLite(url: url, samples: samples)
+        }
+    }
+
+    private func loadFromSQLite(url: URL) -> [Sample] {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else { return [] }
+        defer { sqlite3_close(db) }
+        ensureSQLiteSchema(db)
+
+        let query = "SELECT id, url, tags, created_at, duration, sample_rate, bit_depth, format, file_created, file_size FROM samples"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+
+        var results: [Sample] = []
+        let decoder = ISO8601DateFormatter()
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard
+                let idC = sqlite3_column_text(stmt, 0),
+                let urlC = sqlite3_column_text(stmt, 1)
+            else { continue }
+            let id = UUID(uuidString: String(cString: idC)) ?? UUID()
+            let url = URL(fileURLWithPath: String(cString: urlC))
+            let tags = sqlite3_column_text(stmt, 2).map { String(cString: $0).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } } ?? []
+            let createdAt = sqlite3_column_text(stmt, 3).flatMap { decoder.date(from: String(cString: $0)) } ?? Date()
+            let duration = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 4)
+            let sampleRate = sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 5)
+            let bitDepth = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 6))
+            let format = sqlite3_column_text(stmt, 7).map { String(cString: $0) }
+            let fileCreated = sqlite3_column_text(stmt, 8).flatMap { decoder.date(from: String(cString: $0)) }
+            let fileSize = sqlite3_column_type(stmt, 9) == SQLITE_NULL ? nil : Int64(sqlite3_column_int64(stmt, 9))
+
+            results.append(Sample(
+                id: id,
+                url: url,
+                tags: tags,
+                createdAt: createdAt,
+                durationSeconds: duration,
+                sampleRate: sampleRate,
+                bitDepth: bitDepth,
+                format: format,
+                fileCreated: fileCreated,
+                fileSizeBytes: fileSize
+            ))
+        }
+        return results
+    }
+
+    private func saveToSQLite(url: URL, samples: [Sample]) {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+        ensureSQLiteSchema(db)
+
+        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+        sqlite3_exec(db, "DELETE FROM samples", nil, nil, nil)
+
+        let insertSQL = """
+        INSERT INTO samples (id, url, tags, created_at, duration, sample_rate, bit_depth, format, file_created, file_size)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, insertSQL, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+
+        let formatter = ISO8601DateFormatter()
+
+        for sample in samples {
+            sqlite3_bind_text(stmt, 1, sample.id.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, sample.url.path, -1, SQLITE_TRANSIENT)
+            let tags = sample.tags.joined(separator: ",")
+            sqlite3_bind_text(stmt, 3, tags, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, formatter.string(from: sample.createdAt), -1, SQLITE_TRANSIENT)
+            if let duration = sample.durationSeconds {
+                sqlite3_bind_double(stmt, 5, duration)
+            } else {
+                sqlite3_bind_null(stmt, 5)
+            }
+            if let rate = sample.sampleRate {
+                sqlite3_bind_double(stmt, 6, rate)
+            } else {
+                sqlite3_bind_null(stmt, 6)
+            }
+            if let depth = sample.bitDepth {
+                sqlite3_bind_int(stmt, 7, Int32(depth))
+            } else {
+                sqlite3_bind_null(stmt, 7)
+            }
+            if let format = sample.format {
+                sqlite3_bind_text(stmt, 8, format, -1, SQLITE_TRANSIENT)
+            } else {
+                sqlite3_bind_null(stmt, 8)
+            }
+            if let fileCreated = sample.fileCreated {
+                sqlite3_bind_text(stmt, 9, formatter.string(from: fileCreated), -1, SQLITE_TRANSIENT)
+            } else {
+                sqlite3_bind_null(stmt, 9)
+            }
+            if let size = sample.fileSizeBytes {
+                sqlite3_bind_int64(stmt, 10, size)
+            } else {
+                sqlite3_bind_null(stmt, 10)
+            }
+
+            _ = sqlite3_step(stmt)
+            sqlite3_reset(stmt)
+        }
+        sqlite3_exec(db, "COMMIT", nil, nil, nil)
+    }
+
+    private func ensureSQLiteSchema(_ db: OpaquePointer?) {
+        let sql = """
+        CREATE TABLE IF NOT EXISTS samples (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            tags TEXT,
+            created_at TEXT,
+            duration REAL,
+            sample_rate REAL,
+            bit_depth INTEGER,
+            format TEXT,
+            file_created TEXT,
+            file_size INTEGER
+        );
+        """
+        sqlite3_exec(db, sql, nil, nil, nil)
     }
 
     private func isSupportedAudio(url: URL) -> Bool {
