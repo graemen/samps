@@ -65,7 +65,9 @@ struct ContentView: View {
         } detail: {
             InspectorView()
         }
-        .navigationTitle("SAMPS!")
+        .onAppear {
+            NSApp.mainWindow?.title = "SAMPS!"
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -88,14 +90,25 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 12) {
+            Text(library.libraryDisplayPath)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal)
+            Text(library.libraryDisplayName)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.primary)
+                .padding(.horizontal)
+
             HStack {
                 Text("Samples")
                     .font(.callout.weight(.bold))
                     .foregroundStyle(.primary)
-                Spacer()
                 Text("\(library.filteredSamples.count)")
                     .font(.callout.weight(.bold))
                     .foregroundStyle(.primary)
+                Spacer()
                 Button {
                     library.refreshMissingMetadata()
                 } label: {
@@ -199,6 +212,7 @@ struct SampleRow: View {
     @FocusState private var nameFieldFocused: Bool
 
     var body: some View {
+        let isMissing = !library.fileExists(sample)
         VStack(alignment: .leading, spacing: 4) {
             if isEditing {
                 TextField("", text: $draftName, onCommit: commitRename)
@@ -218,6 +232,7 @@ struct SampleRow: View {
                 Text(sample.displayName)
                     .font(.headline)
                     .fontWeight(library.selection.contains(sample.id) ? .semibold : .regular)
+                    .foregroundStyle(isMissing ? Color.red : Color.primary)
             }
             if !sample.tags.isEmpty {
                 Text(sample.tags.joined(separator: ", "))
@@ -281,13 +296,15 @@ struct WaveformRowBackground: View {
     let sample: Sample
 
     var body: some View {
+        let isLongSample = (sample.durationSeconds ?? 0) > 1024
+        let isMissing = !library.fileExists(sample)
         ZStack {
-            if let image = library.waveform(for: sample) {
+            if !isMissing, let image = library.waveform(for: sample) {
                 Image(nsImage: image)
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFill()
-                    .foregroundStyle(Color(nsColor: .systemGray))
+                    .foregroundStyle(isLongSample ? Color(nsColor: .systemRed) : Color(nsColor: .systemGray))
                     .opacity(0.6)
             } else {
                 LinearGradient(
@@ -306,78 +323,127 @@ struct WaveformRowBackground: View {
 struct WaveformDetailView: View {
     @EnvironmentObject private var library: LibraryStore
     let sample: Sample
+    var zoom: CGFloat = 1.0
+    @State private var lastRequestedWidth: CGFloat = 0
+    @State private var windowWidthBaseline: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 6) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(red: 0.02, green: 0.10, blue: 0.05))
-                    .overlay(
-                        WaveformGrid(color: Color.green.opacity(0.18))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    )
-                    .overlay(
-                        ScanlinesView()
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .opacity(0.12)
-                    )
-                    .overlay(
-                        VignetteView()
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    )
-                if let image = library.detailWaveform(for: sample) ?? library.waveform(for: sample) {
-                    GeometryReader { geo in
-                        let inset: CGFloat = 12
-                        let availableWidth = max(0, geo.size.width - inset * 2)
-                        ZStack {
-                            Image(nsImage: image)
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                                .padding(inset)
-                                .foregroundStyle(Color(red: 0.25, green: 1.0, blue: 0.55))
-                                .opacity(1.0)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                            Image(nsImage: image)
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                                .padding(inset)
-                                .foregroundStyle(Color(red: 0.25, green: 1.0, blue: 0.55))
-                                .opacity(0.35)
-                                .blur(radius: 3)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                            if library.playbackSampleID == sample.id && library.playbackProgress > 0 {
+            GeometryReader { geo in
+                let inset: CGFloat = 12
+                let waveformHeight: CGFloat = 200
+                let baseWidth = geo.size.width
+                let baselineWidth = max(baseWidth, windowWidthBaseline > 0 ? windowWidthBaseline * 0.5 : 0)
+                let contentWidth = max(baseWidth, baseWidth * zoom)
+                let availableWidth = max(0, contentWidth - inset * 2)
+                let targetWidth = max(900, baselineWidth * zoom)
+                let prefetchWidth = max(targetWidth, targetWidth * 1.1)
+
+                ScrollView(.horizontal) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                        if !library.fileExists(sample) {
+                            VStack(spacing: 6) {
+                                Text("Sample file missing")
+                                    .font(.headline)
+                                    .foregroundStyle(.secondary)
+                                Text(sample.url.path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .textSelection(.enabled)
+                            }
+                            .padding()
+                        } else if let image = library.detailWaveform(for: sample),
+                                  let size = library.detailWaveformSize(for: sample),
+                                  size.width >= targetWidth {
+                            ZStack(alignment: .leading) {
                                 Image(nsImage: image)
                                     .renderingMode(.template)
-                                    .resizable()
-                                    .scaledToFit()
+                                    .resizable(resizingMode: .stretch)
+                                    .frame(width: availableWidth, height: waveformHeight - inset * 2, alignment: .leading)
                                     .padding(inset)
-                                    .foregroundStyle(Color(red: 0.55, green: 1.0, blue: 0.75))
-                                    .opacity(0.7)
-                                    .mask(
-                                        HStack {
-                                            Rectangle()
-                                                .frame(width: availableWidth * CGFloat(library.playbackProgress))
-                                            Spacer()
-                                        }
-                                        .padding(.leading, inset)
-                                    )
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                                    .foregroundStyle(Color.primary)
+                                    .opacity(1.0)
+                                    .frame(width: contentWidth, alignment: .leading)
+                                if library.playbackSampleID == sample.id && library.playbackProgress > 0 {
+                                    Image(nsImage: image)
+                                        .renderingMode(.template)
+                                        .resizable(resizingMode: .stretch)
+                                        .frame(width: availableWidth, height: waveformHeight - inset * 2, alignment: .leading)
+                                        .padding(inset)
+                                        .foregroundStyle(Color.secondary)
+                                        .opacity(0.6)
+                                        .frame(width: contentWidth, alignment: .leading)
+                                        .mask(
+                                            HStack {
+                                                Rectangle()
+                                                    .frame(width: availableWidth * CGFloat(library.playbackProgress))
+                                                Spacer()
+                                            }
+                                            .padding(.leading, inset)
+                                        )
+                                }
                             }
+                        } else if let image = library.waveform(for: sample) {
+                            ZStack(alignment: .leading) {
+                                Image(nsImage: image)
+                                    .renderingMode(.template)
+                                    .resizable(resizingMode: .stretch)
+                                    .frame(width: availableWidth, height: waveformHeight - inset * 2, alignment: .leading)
+                                    .padding(inset)
+                                    .foregroundStyle(Color.primary)
+                                    .opacity(0.6)
+                                    .frame(width: contentWidth, alignment: .leading)
+                            }
+                        } else {
+                            ProgressView()
                         }
                     }
-                } else {
-                    ProgressView()
+                    .frame(width: contentWidth, height: waveformHeight)
+                }
+                .frame(height: waveformHeight)
+                .id(sample.id)
+                .onAppear {
+                    guard library.fileExists(sample) else { return }
+                    if windowWidthBaseline == 0 {
+                        windowWidthBaseline = max(baseWidth * 2, 1200)
+                    }
+                    requestDetailWaveformIfNeeded(sample: sample, width: prefetchWidth, height: waveformHeight)
+                }
+                .onChange(of: sample.id) { _ in
+                    guard library.fileExists(sample) else { return }
+                    lastRequestedWidth = 0
+                    if windowWidthBaseline == 0 {
+                        windowWidthBaseline = max(baseWidth * 2, 1200)
+                    }
+                    requestDetailWaveformIfNeeded(sample: sample, width: prefetchWidth, height: waveformHeight)
+                }
+                .onChange(of: baseWidth) { _ in
+                    guard library.fileExists(sample) else { return }
+                    requestDetailWaveformIfNeeded(sample: sample, width: prefetchWidth, height: waveformHeight)
+                }
+                .onChange(of: zoom) { newZoom in
+                    guard library.fileExists(sample) else { return }
+                    let updatedWidth = max(900, baseWidth * newZoom)
+                    let updatedPrefetch = max(updatedWidth, updatedWidth * 1.1)
+                    requestDetailWaveformIfNeeded(sample: sample, width: updatedPrefetch, height: waveformHeight)
                 }
             }
+            .frame(height: 200)
             waveformAxis
             WaveformXAxisLegend()
         }
-        .task {
+        .task(id: sample.id) {
             library.requestWaveform(for: sample)
-            library.requestDetailWaveform(for: sample, size: CGSize(width: 900, height: 200))
         }
+    }
+
+    private func requestDetailWaveformIfNeeded(sample: Sample, width: CGFloat, height: CGFloat) {
+        guard width > lastRequestedWidth + 1 else { return }
+        lastRequestedWidth = width
+        library.requestDetailWaveform(for: sample, size: CGSize(width: width, height: height))
     }
 
     private var waveformAxis: some View {
@@ -407,32 +473,6 @@ struct WaveformDetailView: View {
     }
 }
 
-struct WaveformGrid: View {
-    var color: Color = Color.gray.opacity(0.25)
-
-    var body: some View {
-        GeometryReader { geo in
-            let width = geo.size.width
-            let height = geo.size.height
-            let columns = 10
-            let rows = 4
-            Path { path in
-                for i in 0...columns {
-                    let x = width * CGFloat(i) / CGFloat(columns)
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: height))
-                }
-                for j in 0...rows {
-                    let y = height * CGFloat(j) / CGFloat(rows)
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: width, y: y))
-                }
-            }
-            .stroke(color, lineWidth: 1)
-        }
-    }
-}
-
 struct WaveformXAxisLegend: View {
     var body: some View {
         HStack {
@@ -445,33 +485,6 @@ struct WaveformXAxisLegend: View {
     }
 }
 
-struct ScanlinesView: View {
-    var body: some View {
-        GeometryReader { geo in
-            let height = geo.size.height
-            Path { path in
-                var y: CGFloat = 0
-                while y <= height {
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: geo.size.width, y: y))
-                    y += 4
-                }
-            }
-            .stroke(Color.black.opacity(0.4), lineWidth: 1)
-        }
-    }
-}
-
-struct VignetteView: View {
-    var body: some View {
-        RadialGradient(
-            gradient: Gradient(colors: [Color.clear, Color.black.opacity(0.45)]),
-            center: .center,
-            startRadius: 60,
-            endRadius: 240
-        )
-    }
-}
 
 enum AudioFormatOption: String, CaseIterable {
     case wav
@@ -539,13 +552,16 @@ struct DetailView: View {
     @EnvironmentObject private var library: LibraryStore
 
     var body: some View {
-        if library.selection.isEmpty {
-            EmptyStateView()
-        } else if library.selection.count == 1, let sample = library.selectedSample {
-            SampleDetail(sample: sample)
-        } else {
-            BulkDetailView()
+        Group {
+            if library.selection.isEmpty {
+                EmptyStateView()
+            } else if library.selection.count == 1, let sample = library.selectedSample {
+                SampleDetail(sample: sample)
+            } else {
+                BulkDetailView()
+            }
         }
+        .navigationTitle("SAMPS!")
     }
 }
 
@@ -612,6 +628,7 @@ struct SampleDetail: View {
     @State private var selectedBitDepth: WavBitDepthOption = .bit16
     @State private var selectedSampleRate: WavSampleRateOption = .hz44100
     @State private var showDeleteConfirm = false
+    @State private var waveformZoom: CGFloat = 1.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -725,8 +742,30 @@ struct SampleDetail: View {
                 }
             }
 
-            WaveformDetailView(sample: sample)
+            WaveformDetailView(sample: sample, zoom: waveformZoom)
                 .frame(maxWidth: .infinity, minHeight: 120)
+
+            HStack {
+                Text("Zoom")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    waveformZoom = max(1.0, waveformZoom - 0.5)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                Slider(value: $waveformZoom, in: 1.0...10.0, step: 0.5)
+                    .frame(maxWidth: 200)
+                Text(String(format: "%.2fx", waveformZoom))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    waveformZoom = min(10.0, waveformZoom + 0.5)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                Spacer()
+            }
 
             Spacer()
         }
@@ -742,6 +781,12 @@ struct SampleDetail: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will permanently delete the selected audio files from disk.")
+        }
+        .onAppear {
+            waveformZoom = 1.0
+        }
+        .onChange(of: sample.id) { _ in
+            waveformZoom = 1.0
         }
     }
 
@@ -1014,6 +1059,8 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var refreshStatusText: String = ""
     @Published var sortKey: SortKey = .name
     @Published var sortOrder: SortOrder = .ascending
+    @Published private(set) var libraryDisplayName: String = "Library"
+    @Published private(set) var libraryDisplayPath: String = ""
 
     private var player: AVPlayer?
     private var currentURL: URL?
@@ -1024,8 +1071,13 @@ final class LibraryStore: ObservableObject {
     private var waveformInProgress: Set<Sample.ID> = []
     private var detailWaveformInProgress: Set<Sample.ID> = []
     @Published private var detailWaveformCache: [Sample.ID: NSImage] = [:]
+    private var detailWaveformSizeCache: [Sample.ID: CGSize] = [:]
     private let supportedExtensions: Set<String> = ["wav", "aif", "aiff", "mp3", "m4a", "flac", "ogg"]
     private var librarySource: LibrarySource
+
+    func fileExists(_ sample: Sample) -> Bool {
+        FileManager.default.fileExists(atPath: sample.url.path)
+    }
 
     var filteredSamples: [Sample] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1076,7 +1128,10 @@ final class LibraryStore: ObservableObject {
     }
 
     init() {
-        self.librarySource = .json(Self.makeDefaultLibraryURL())
+        let url = Self.makeDefaultLibraryURL()
+        self.librarySource = .json(url)
+        self.libraryDisplayName = url.lastPathComponent
+        self.libraryDisplayPath = url.deletingLastPathComponent().path
         load()
     }
 
@@ -1087,12 +1142,9 @@ final class LibraryStore: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.allowedFileTypes = ["json", "sqlite", "db"]
         if panel.runModal() == .OK, let url = panel.url {
-            if url.pathExtension.lowercased() == "json" {
-                librarySource = .json(url)
-            } else {
-                librarySource = .sqlite(url)
-            }
-            selection.removeAll()
+            stopPlayer()
+            resetLibraryState()
+            setLibrarySource(url)
             load()
         }
     }
@@ -1103,11 +1155,7 @@ final class LibraryStore: ObservableObject {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "library.json"
         if panel.runModal() == .OK, let url = panel.url {
-            if url.pathExtension.lowercased() == "json" {
-                librarySource = .json(url)
-            } else {
-                librarySource = .sqlite(url)
-            }
+            setLibrarySource(url)
             save()
         }
     }
@@ -1120,13 +1168,19 @@ final class LibraryStore: ObservableObject {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "library.json"
         if panel.runModal() == .OK, let url = panel.url {
-            if url.pathExtension.lowercased() == "json" {
-                librarySource = .json(url)
-            } else {
-                librarySource = .sqlite(url)
-            }
+            setLibrarySource(url)
             save()
         }
+    }
+
+    private func setLibrarySource(_ url: URL) {
+        if url.pathExtension.lowercased() == "json" {
+            librarySource = .json(url)
+        } else {
+            librarySource = .sqlite(url)
+        }
+        libraryDisplayName = url.lastPathComponent
+        libraryDisplayPath = url.deletingLastPathComponent().path
     }
 
     private func resetLibraryState() {
@@ -1135,6 +1189,7 @@ final class LibraryStore: ObservableObject {
         searchText = ""
         waveformCache.removeAll()
         detailWaveformCache.removeAll()
+        detailWaveformSizeCache.removeAll()
         waveformInProgress.removeAll()
         detailWaveformInProgress.removeAll()
     }
@@ -1489,8 +1544,18 @@ final class LibraryStore: ObservableObject {
         detailWaveformCache[sample.id]
     }
 
+    func detailWaveformSize(for sample: Sample) -> CGSize? {
+        detailWaveformSizeCache[sample.id]
+    }
+
     func requestDetailWaveform(for sample: Sample, size: CGSize) {
-        if detailWaveformCache[sample.id] != nil || detailWaveformInProgress.contains(sample.id) { return }
+        guard fileExists(sample) else { return }
+        if let cachedSize = detailWaveformSizeCache[sample.id],
+           cachedSize.width >= size.width,
+           cachedSize.height >= size.height {
+            return
+        }
+        if detailWaveformInProgress.contains(sample.id) { return }
         detailWaveformInProgress.insert(sample.id)
         let sampleID = sample.id
         let sampleURL = sample.url
@@ -1500,12 +1565,14 @@ final class LibraryStore: ObservableObject {
             }.value
             if let cgImage {
                 self.detailWaveformCache[sampleID] = NSImage(cgImage: cgImage, size: size)
+                self.detailWaveformSizeCache[sampleID] = size
             }
             self.detailWaveformInProgress.remove(sampleID)
         }
     }
 
     func requestWaveform(for sample: Sample) {
+        guard fileExists(sample) else { return }
         if waveformCache[sample.id] != nil || waveformInProgress.contains(sample.id) { return }
         waveformInProgress.insert(sample.id)
         let sampleID = sample.id
@@ -1867,7 +1934,7 @@ final class LibraryStore: ObservableObject {
             case .name:
                 result = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
             case .size:
-                result = compare(lhs.fileSizeBytes, rhs.fileSizeBytes)
+                result = compare(lhs.durationSeconds, rhs.durationSeconds)
             case .dateCreated:
                 result = compare(lhs.fileCreated, rhs.fileCreated)
             case .sampleRate:
