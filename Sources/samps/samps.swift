@@ -5,12 +5,26 @@ import AVFoundation
 @main
 struct SampsApp: App {
     @StateObject private var library = LibraryStore()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(library)
                 .frame(minWidth: 980, minHeight: 640)
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.codex.samps"
+        let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }
+        if running.count > 1 {
+            for app in running where app != NSRunningApplication.current {
+                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            }
+            NSApp.terminate(nil)
         }
     }
 }
@@ -205,6 +219,20 @@ struct SampleRow: View {
                 isEditing = true
                 nameFieldFocused = true
             }
+            Button("Remove") {
+                if library.selection.count > 1 {
+                    library.removeSelectedSamples()
+                } else {
+                    library.removeSample(sample)
+                }
+            }
+            Button("Delete") {
+                if library.selection.count > 1 {
+                    library.deleteSelectedFilesFromDisk()
+                } else {
+                    library.deleteSampleFromDisk(sample)
+                }
+            }
         }
     }
 
@@ -300,7 +328,6 @@ struct WaveformDetailView: View {
                 } else {
                     ProgressView()
                 }
-                WaveformYAxis()
             }
             waveformAxis
             WaveformXAxisLegend()
@@ -359,25 +386,6 @@ struct WaveformGrid: View {
             }
             .stroke(Color.gray.opacity(0.25), lineWidth: 1)
         }
-    }
-}
-
-struct WaveformYAxis: View {
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("0 dB")
-                Text("-6 dB")
-                Text("-12 dB")
-                Text("-24 dB")
-                Text("-48 dB")
-            }
-            .font(.caption2)
-            .foregroundStyle(Color.gray.opacity(0.7))
-            .padding(.leading, 10)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
@@ -531,6 +539,7 @@ struct SampleDetail: View {
     @State private var selectedFormat: AudioFormatOption = .wav
     @State private var selectedBitDepth: WavBitDepthOption = .bit16
     @State private var selectedSampleRate: WavSampleRateOption = .hz44100
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -591,53 +600,56 @@ struct SampleDetail: View {
             }
 
             Divider()
-            HStack {
-                Text("Selected samples")
-                    .font(.headline)
-                Spacer()
-                Button(role: .destructive) {
-                    library.removeSelectedSamples()
-                } label: {
-                    Label("Remove Selected", systemImage: "trash")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Text("Sample")
+                        .font(.headline)
+                    Spacer()
+                    Button(role: .destructive) {
+                        library.removeSelectedSamples()
+                    } label: {
+                        Label("Remove", systemImage: "scissors")
+                    }
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
                 }
-                Button(role: .destructive) {
-                    library.deleteSelectedFilesFromDisk()
-                } label: {
-                    Label("Delete Selected", systemImage: "trash.slash")
-                }
-            }
 
-            HStack(spacing: 12) {
-                Text("Convert to")
-                    .font(.headline)
-                Picker("Format", selection: $selectedFormat) {
-                    ForEach(AudioFormatOption.allCases, id: \.self) { format in
-                        Text(format.displayName).tag(format)
-                    }
-                }
-                .pickerStyle(.menu)
-                if selectedFormat == .wav {
-                    Picker("Bit Depth", selection: $selectedBitDepth) {
-                        ForEach(WavBitDepthOption.allCases, id: \.self) { option in
-                            Text(option.displayName).tag(option)
+                HStack(spacing: 12) {
+                    Text("Convert")
+                        .font(.headline)
+                    Picker("Format", selection: $selectedFormat) {
+                        ForEach(AudioFormatOption.allCases, id: \.self) { format in
+                            Text(format.displayName).tag(format)
                         }
                     }
                     .pickerStyle(.menu)
-                    Picker("Sample Rate", selection: $selectedSampleRate) {
-                        ForEach(WavSampleRateOption.allCases, id: \.self) { option in
-                            Text(option.displayName).tag(option)
+                    if selectedFormat == .wav {
+                        Picker("Depth", selection: $selectedBitDepth) {
+                            ForEach(WavBitDepthOption.allCases, id: \.self) { option in
+                                Text(option.displayName).tag(option)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        Picker("Rate", selection: $selectedSampleRate) {
+                            ForEach(WavSampleRateOption.allCases, id: \.self) { option in
+                                Text(option.displayName).tag(option)
+                            }
+                        }
+                        .pickerStyle(.menu)
                     }
-                    .pickerStyle(.menu)
-                }
-                Button {
-                    library.convertSelectedSamples(
-                        to: selectedFormat,
-                        wavBitDepth: selectedBitDepth,
-                        wavSampleRate: selectedSampleRate
-                    )
-                } label: {
-                    Label("Convert Selected", systemImage: "arrow.triangle.2.circlepath")
+                    Spacer()
+                    Button {
+                        library.convertSelectedSamples(
+                            to: selectedFormat,
+                            wavBitDepth: selectedBitDepth,
+                            wavSampleRate: selectedSampleRate
+                        )
+                    } label: {
+                        Label("Convert", systemImage: "arrow.triangle.2.circlepath")
+                    }
                 }
             }
 
@@ -647,6 +659,18 @@ struct SampleDetail: View {
             Spacer()
         }
         .padding(24)
+        .confirmationDialog(
+            "Delete selected files from disk?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Files", role: .destructive) {
+                library.deleteSelectedFilesFromDisk()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently delete the selected audio files from disk.")
+        }
     }
 
     private func formatDuration(_ seconds: Double) -> String {
@@ -770,19 +794,20 @@ struct BulkDetailView: View {
                 }
                 .pickerStyle(.menu)
                 if selectedFormat == .wav {
-                    Picker("Bit Depth", selection: $selectedBitDepth) {
+                    Picker("Depth", selection: $selectedBitDepth) {
                         ForEach(WavBitDepthOption.allCases, id: \.self) { option in
                             Text(option.displayName).tag(option)
                         }
                     }
                     .pickerStyle(.menu)
-                    Picker("Sample Rate", selection: $selectedSampleRate) {
+                    Picker("Rate", selection: $selectedSampleRate) {
                         ForEach(WavSampleRateOption.allCases, id: \.self) { option in
                             Text(option.displayName).tag(option)
                         }
                     }
                     .pickerStyle(.menu)
                 }
+                Spacer()
                 Button {
                     library.convertSelectedSamples(
                         to: selectedFormat,
@@ -1094,6 +1119,12 @@ final class LibraryStore: ObservableObject {
         save()
     }
 
+    func removeSample(_ sample: Sample) {
+        samples.removeAll { $0.id == sample.id }
+        selection.remove(sample.id)
+        save()
+    }
+
     func deleteSelectedFilesFromDisk() {
         guard !selection.isEmpty else { return }
         let ids = selection
@@ -1103,6 +1134,13 @@ final class LibraryStore: ObservableObject {
         }
         samples.removeAll { ids.contains($0.id) }
         selection.removeAll()
+        save()
+    }
+
+    func deleteSampleFromDisk(_ sample: Sample) {
+        try? FileManager.default.removeItem(at: sample.url)
+        samples.removeAll { $0.id == sample.id }
+        selection.remove(sample.id)
         save()
     }
 
