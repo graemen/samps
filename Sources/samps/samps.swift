@@ -298,13 +298,18 @@ struct WaveformRowBackground: View {
     var body: some View {
         let isLongSample = (sample.durationSeconds ?? 0) > 1024
         let isMissing = !library.fileExists(sample)
+        let isPlaying = library.isPlaying(sample)
         ZStack {
             if !isMissing, let image = library.waveform(for: sample) {
                 Image(nsImage: image)
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFill()
-                    .foregroundStyle(isLongSample ? Color(nsColor: .systemRed) : Color(nsColor: .systemGray))
+                    .foregroundStyle(
+                        isPlaying
+                        ? Color(nsColor: .systemBlue)
+                        : (isLongSample ? Color(nsColor: .systemRed) : Color(nsColor: .systemGray))
+                    )
                     .opacity(0.6)
             } else {
                 LinearGradient(
@@ -373,7 +378,7 @@ struct WaveformDetailView: View {
                                         .resizable(resizingMode: .stretch)
                                         .frame(width: availableWidth, height: waveformHeight - inset * 2, alignment: .leading)
                                         .padding(inset)
-                                        .foregroundStyle(Color.secondary)
+                                        .foregroundStyle(Color(nsColor: .systemBlue))
                                         .opacity(0.6)
                                         .frame(width: contentWidth, alignment: .leading)
                                         .mask(
@@ -402,6 +407,19 @@ struct WaveformDetailView: View {
                         }
                     }
                     .frame(width: contentWidth, height: waveformHeight)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onEnded { value in
+                                let dx = abs(value.translation.width)
+                                let dy = abs(value.translation.height)
+                                guard dx < 3, dy < 3 else { return }
+                                let localX = value.location.x - inset
+                                let clamped = max(0, min(availableWidth, localX))
+                                let progress = availableWidth > 0 ? Double(clamped / availableWidth) : 0
+                                library.seekPreview(for: sample, progress: progress)
+                            }
+                    )
                 }
                 .frame(height: waveformHeight)
                 .id(sample.id)
@@ -1601,33 +1619,15 @@ final class LibraryStore: ObservableObject {
             stopPlayer()
             return
         }
+        startPlayback(for: sample, startAt: nil)
+    }
 
-        stopPlayer()
-        let player = AVPlayer(url: sample.url)
-        self.player = player
-        self.currentURL = sample.url
-        self.playbackSampleID = sample.id
-        self.playbackProgress = 0
-        playerEndObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: player.currentItem,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.stopPlayer()
-            }
-        }
-        let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        playerTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self else { return }
-            let duration = player.currentItem?.duration.seconds ?? 0
-            if duration > 0 {
-                Task { @MainActor in
-                    self.playbackProgress = min(1, max(0, time.seconds / duration))
-                }
-            }
-        }
-        player.play()
+    func seekPreview(for sample: Sample, progress: Double) {
+        guard progress >= 0 else { return }
+        let clamped = min(1, progress)
+        let duration = sample.durationSeconds ?? 0
+        let targetSeconds = duration > 0 ? duration * clamped : 0
+        startPlayback(for: sample, startAt: targetSeconds)
     }
 
     func isPlaying(_ sample: Sample) -> Bool {
@@ -1654,6 +1654,42 @@ final class LibraryStore: ObservableObject {
         currentURL = nil
         playbackSampleID = nil
         playbackProgress = 0
+    }
+
+    private func startPlayback(for sample: Sample, startAt seconds: Double?) {
+        stopPlayer()
+        let player = AVPlayer(url: sample.url)
+        self.player = player
+        self.currentURL = sample.url
+        self.playbackSampleID = sample.id
+        self.playbackProgress = 0
+        playerEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.stopPlayer()
+            }
+        }
+        let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        playerTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            guard let self else { return }
+            let duration = player.currentItem?.duration.seconds ?? 0
+            if duration > 0 {
+                Task { @MainActor in
+                    self.playbackProgress = min(1, max(0, time.seconds / duration))
+                }
+            }
+        }
+        if let seconds, seconds > 0 {
+            let seekTime = CMTime(seconds: seconds, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            player.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                player.play()
+            }
+        } else {
+            player.play()
+        }
     }
 
     private func load() {
